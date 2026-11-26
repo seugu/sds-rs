@@ -352,6 +352,60 @@ fn sync_messages_are_not_logged() {
 }
 
 #[test]
+fn reports_what_a_sync_names_and_this_participant_lacks() {
+    let mut alice = channel("alice");
+    let mut bob = channel("bob");
+    let mut carol = channel("carol");
+    carol
+        .receive(send(&mut alice, "m1", 1000), None, 1000)
+        .unwrap();
+    let sync = sync_record(&carol.tick(1000 + MINUTE_MS, &mut rng()));
+
+    let events = bob.receive(sync.clone(), None, 1000 + MINUTE_MS).unwrap();
+
+    let [Event::SyncNamesMissing {
+        sync_id,
+        missing_dependencies,
+    }] = events.as_slice()
+    else {
+        panic!("expected one SyncNamesMissing, got {events:?}");
+    };
+    assert_eq!(sync_id, &sync.header.message_id);
+    assert_eq!(ids(missing_dependencies), ["m1"]);
+}
+
+#[test]
+fn acknowledges_with_a_sync_soon_after_receiving() {
+    let mut alice = channel("alice");
+    let mut config = Config::new("bob", CHANNEL_ID);
+    config.ack_sync_max_delay_ms = Some(5000);
+    let mut bob = Channel::new(config).unwrap();
+    bob.receive(send(&mut alice, "m1", 1000), None, 1000)
+        .unwrap();
+
+    let sync = sync_record(&bob.tick(6000, &mut rng()));
+    let events = alice.receive(sync, None, 6000).unwrap();
+
+    assert!(events.contains(&Event::MessageAcknowledged {
+        message_id: "m1".into()
+    }));
+}
+
+#[test]
+fn sends_no_acknowledgement_sync_for_a_sync() {
+    let mut carol = channel("carol");
+    let mut config = Config::new("bob", CHANNEL_ID);
+    config.ack_sync_max_delay_ms = Some(5000);
+    let mut bob = Channel::new(config).unwrap();
+    let sync = sync_record(&carol.tick(MINUTE_MS, &mut rng()));
+    bob.receive(sync, None, MINUTE_MS).unwrap();
+
+    let events = bob.tick(MINUTE_MS + 5000, &mut rng());
+
+    assert!(!events.iter().any(|event| matches!(event, Event::Sync(_))));
+}
+
+#[test]
 fn delivers_ephemeral_messages_without_logging() {
     let alice = channel("alice");
     let mut bob = channel("bob");

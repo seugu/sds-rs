@@ -29,6 +29,12 @@ The library has no threads, timers or I/O. The caller supplies the time, the ran
 
 An `SDSRecord` is the `Header`, the spec's `Message` without its content, and the content beside it, so a transport can carry the content apart, for instance encrypted. The crate has no wire format of its own: the caller encodes a record for its transport and decodes the ones that arrive.
 
+## Quiet participants
+
+A sender learns of a delivery only from what the receiver sends next. A participant with nothing to send stays silent until the channel has been quiet for `sync_interval_ms`, so in a busy channel its acknowledgements may never go out. Set `config.ack_sync_max_delay_ms` to have it sync within that many milliseconds of receiving a message instead. One sync covers everything received before it, and a sync never triggers another.
+
+A sync's history can name a message this participant lacks. As a sync is never buffered, `Event::SyncNamesMissing` reports those messages, so the caller can fetch them without waiting for SDS-R or for a content message that names them.
+
 ## Joining a channel under way
 
 A participant joining a channel that already has history sets `config.start` to a `StartPoint`, a message such as the one that admitted it. Its clock starts at that message's timestamp. Nothing stamped at or before that timestamp is released or named in the participant's own histories: such a message is logged on arrival. The start point and the IDs a history lists before it count as delivered, so they are never waited for or requested.

@@ -19,6 +19,12 @@ pub enum Event {
         /// Arrived, not yet released.
         buffered_dependencies: Vec<HistoryEntry>,
     },
+    /// A sync names messages that are neither delivered nor buffered here. A sync is never
+    /// buffered, so this is the only report of what it shows missing.
+    SyncNamesMissing {
+        sync_id: String,
+        missing_dependencies: Vec<HistoryEntry>,
+    },
     /// A received message that is neither buffered nor released.
     MessageIgnored {
         message_id: String,

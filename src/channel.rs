@@ -4,6 +4,7 @@ use crate::bloom::{hash_count_for, RollingBloomFilter};
 use crate::config::Config;
 use crate::error::Error;
 use crate::event::{Event, IgnoreReason, LossReason};
+use crate::hash::hash_fields;
 use crate::header::{Header, HistoryEntry};
 use crate::incoming::{has_dependencies, IncomingBuffer, PendingDelivery};
 use crate::outgoing::OutgoingBuffer;
@@ -30,6 +31,7 @@ pub struct Channel<S: Storage = InMemoryStorage> {
     last_activity_ms: u64,
     last_sent_ms: u64,
     sync_jitter_ms: u64,
+    ack_sync_due_ms: Option<u64>,
 }
 
 impl Channel<InMemoryStorage> {
@@ -61,6 +63,7 @@ impl<S: Storage> Channel<S> {
             last_activity_ms: 0,
             last_sent_ms: 0,
             sync_jitter_ms: 0,
+            ack_sync_due_ms: None,
         })
     }
 
@@ -141,6 +144,10 @@ impl<S: Storage> Channel<S> {
         };
 
         self.last_activity_ms = now_ms;
+        // A copy counts too: a resend means the sender has not yet seen an acknowledgement.
+        if has_content(&record) {
+            self.schedule_ack_sync(&header.message_id, now_ms);
+        }
         let mut events = self.review_acks(&header);
         // Resends carry their original, now stale, repair requests.
         if self.storage.contains(&header.message_id) || self.incoming.contains(&header.message_id) {
@@ -159,6 +166,7 @@ impl<S: Storage> Channel<S> {
         if !has_content(&record) {
             let missing = self.incoming.missing_dependencies(&header, &self.storage);
             self.request_repairs(&missing, now_ms);
+            events.extend(sync_names_missing(header.message_id, missing));
             return Ok(events);
         }
 
@@ -374,7 +382,20 @@ impl<S: Storage> Channel<S> {
             .collect()
     }
 
-    // Requests that are due skip the quiet-channel backoff so repairs are not delayed.
+    // One sync acknowledges every message received before it goes out.
+    fn schedule_ack_sync(&mut self, message_id: &str, now_ms: u64) {
+        let Some(max_delay_ms) = self.config.ack_sync_max_delay_ms else {
+            return;
+        };
+        if self.ack_sync_due_ms.is_some() {
+            return;
+        }
+        // Spread so the receivers of one message do not all sync in the same instant.
+        let delay_ms = hash_fields(&[&self.config.participant_id, message_id]) % (max_delay_ms + 1);
+        self.ack_sync_due_ms = Some(now_ms + delay_ms);
+    }
+
+    // Due requests and acknowledgements skip the quiet-channel backoff so neither is delayed.
     fn is_sync_due(&self, now_ms: u64) -> bool {
         let quiet_until_ms =
             self.last_activity_ms + self.config.sync_interval_ms + self.sync_jitter_ms;
@@ -383,7 +404,8 @@ impl<S: Storage> Channel<S> {
             .as_ref()
             .is_some_and(|repair| repair.has_due_requests(now_ms));
         let can_resync = now_ms >= self.last_sent_ms + self.config.sync_interval_ms;
-        now_ms >= quiet_until_ms || (has_due_requests && can_resync)
+        let is_ack_due = self.ack_sync_due_ms.is_some_and(|due_ms| now_ms >= due_ms);
+        now_ms >= quiet_until_ms || is_ack_due || (has_due_requests && can_resync)
     }
 
     fn send_sync(&mut self, now_ms: u64, rng: &mut impl Rng) -> Event {
@@ -401,9 +423,11 @@ impl<S: Storage> Channel<S> {
         })
     }
 
+    // Whatever is sent carries the current history and bloom filter, so it acknowledges too.
     fn mark_sent(&mut self, now_ms: u64) {
         self.last_sent_ms = now_ms;
         self.last_activity_ms = now_ms;
+        self.ack_sync_due_ms = None;
     }
 
     fn check_outgoing_content(&self, content: &[u8]) -> Result<(), Error> {
@@ -439,6 +463,13 @@ fn has_content(record: &SDSRecord) -> bool {
         .content
         .as_ref()
         .is_some_and(|content| !content.is_empty())
+}
+
+fn sync_names_missing(sync_id: String, missing_dependencies: Vec<HistoryEntry>) -> Option<Event> {
+    (!missing_dependencies.is_empty()).then_some(Event::SyncNamesMissing {
+        sync_id,
+        missing_dependencies,
+    })
 }
 
 // A sync carries no message, so is never reported.

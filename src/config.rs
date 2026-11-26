@@ -35,6 +35,9 @@ pub struct Config {
     pub max_content_size: usize,
     pub repair: Option<RepairConfig>,
     pub start: Option<StartPoint>,
+    /// Sync within this many ms of receiving a message, so its sender learns of the delivery
+    /// even from a participant with nothing to send. `None` waits for a quiet channel.
+    pub ack_sync_max_delay_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -72,6 +75,7 @@ impl Config {
             max_content_size: DEFAULT_MAX_CONTENT_SIZE,
             repair: Some(RepairConfig::default()),
             start: None,
+            ack_sync_max_delay_ms: None,
         }
     }
 
